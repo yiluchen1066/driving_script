@@ -205,8 +205,8 @@ class State:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return set()
-        except json.JSONDecodeError:
-            log.warning("state file %s is not valid JSON, starting fresh", self.path)
+        except (ValueError, OSError) as exc:  # bad JSON, truncated UTF-8, unreadable path
+            log.warning("state file %s is unreadable (%s), starting fresh", self.path, exc)
             return set()
         if not isinstance(data, dict) or not isinstance(data.get("notified"), list):
             log.warning("state file %s has unexpected shape, starting fresh", self.path)
