@@ -16,10 +16,13 @@ import re
 import smtplib
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
+from zoneinfo import ZoneInfo
+
+import requests
 
 log = logging.getLogger("exam_poller")
 
@@ -287,3 +290,147 @@ class Alerts:
         if name in self.active:
             log.info("problem cleared: %s", name)
         self.active.discard(name)
+
+
+ZURICH = ZoneInfo("Europe/Zurich")
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+    ),
+    "Referer": PORTAL_UI_URL,
+    "Origin": "https://portal.stva.zh.ch",
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Accept-Language": "de-CH,de;q=0.9,en;q=0.8",
+}
+
+
+class PortalError(Exception):
+    """The portal answered with an error status or something that is not JSON."""
+
+
+class LoginRejected(PortalError):
+    def __init__(self, status: int):
+        super().__init__(f"login rejected with HTTP {status}")
+        self.status = status
+
+
+def type_body(cat: dict, **extra: Any) -> dict:
+    """Request body shared by the location and free-slot endpoints, built from one
+    entry of /personne/listCatPossible."""
+    return {
+        "typeCategorieLieuDispo": {
+            "idGroupeExamen": cat.get("idGroupeExamen"),
+            "idCategorie": cat.get("categorie"),
+            "idTypeExamen": cat.get("idTypeExamen"),
+            "idGenreExamen": cat.get("idGenreExamen"),
+            **extra,
+        },
+        "rendezVous": cat.get("rendezVous"),
+    }
+
+
+def portal_datetime(day: date) -> str:
+    """Serialise a date the way the browser does: noon Zurich time as UTC ISO with Z."""
+    local = datetime.combine(day, time(12, 0), tzinfo=ZURICH)
+    return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+class Portal:
+    def __init__(self, candidate_id: str, birth_date: str, session=None,
+                 lang: str = "de", timeout: int = 30):
+        self.candidate_id = candidate_id
+        self.birth_date = birth_date
+        self.lang = lang
+        self.timeout = timeout
+        self.session = session if session is not None else requests.Session()
+        self.session.headers.update(HEADERS)
+        self.logged_in = False
+
+    # -- low level -----------------------------------------------------------
+
+    def _raw(self, method: str, path: str, body: dict | None = None):
+        return self.session.request(method, BASE_URL + path, json=body, timeout=self.timeout)
+
+    def _json(self, resp, method: str, path: str) -> Any:
+        try:
+            return resp.json()
+        except ValueError:
+            raise PortalError(f"{method} {path}: non-JSON response ({resp.text[:120]!r})") from None
+
+    def _call(self, method: str, path: str, body: dict | None = None, retry_login: bool = True) -> Any:
+        resp = self._raw(method, path, body)
+        if resp.status_code == 401 and retry_login and self.logged_in:
+            log.info("session expired, logging in again")
+            self.login()
+            return self._call(method, path, body, retry_login=False)
+        if resp.status_code >= 400:
+            raise PortalError(f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:200]}")
+        return self._json(resp, method, path)
+
+    def get(self, path: str) -> Any:
+        return self._call("GET", path)
+
+    def post(self, path: str, body: dict) -> Any:
+        return self._call("POST", path, body)
+
+    # -- endpoints -----------------------------------------------------------
+
+    def check_params(self) -> tuple[bool, bool]:
+        data = self._call("GET", "/param/load", retry_login=False)
+        captcha = bool((data.get("captchaParam") or {}).get("conduitePublic"))
+        blocked = bool((data.get("blocking") or {}).get("conduitePublic"))
+        return captcha, blocked
+
+    def login(self) -> dict:
+        self.logged_in = False
+        path = f"/login/loginConduitePrive/{self.lang}"
+        body = {"noRegistre": self.candidate_id, "dateNaissance": self.birth_date, "captcha": ""}
+        resp = self._raw("POST", path, body)
+        if resp.status_code in (401, 403):
+            raise LoginRejected(resp.status_code)
+        if resp.status_code >= 400:
+            raise PortalError(f"POST {path} -> HTTP {resp.status_code}: {resp.text[:200]}")
+        data = self._json(resp, "POST", path)
+        self.logged_in = True
+        log.info("logged in")
+        return data
+
+    def categories(self) -> list[dict]:
+        data = self.get("/personne/listCatPossible")
+        return data if isinstance(data, list) else [data]
+
+    def locations(self, cat: dict) -> list[dict]:
+        data = self.post("/lieu-examen/listeLieu", type_body(cat))
+        return data if isinstance(data, list) else [data]
+
+    def free_week(self, cat: dict, id_lieu: Any, base: date) -> dict:
+        body = type_body(cat, dateBase=portal_datetime(base), idLieuExamen=id_lieu)
+        return self.post("/lieu-examen/listeJourHeureLibre", body)
+
+    # -- discovery -----------------------------------------------------------
+
+    def discover(self, out_dir: Path) -> list[Path]:
+        """Run every call once and save the raw JSON so parsers can be checked
+        against real data. Output contains personal data; keep it out of git."""
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        written: list[Path] = []
+
+        def dump(name: str, data: Any) -> None:
+            p = out_dir / f"{name}.json"
+            p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            written.append(p)
+
+        dump("0_param", self._call("GET", "/param/load", retry_login=False))
+        dump("1_login", self.login())
+        cats = self.categories()
+        dump("2_categories", cats)
+        for i, cat in enumerate(cats):
+            locs = self.locations(cat)
+            dump(f"3_locations_cat{i}", locs)
+            for j, loc in enumerate(locs):
+                dump(f"4_week_cat{i}_loc{j}", self.free_week(cat, loc.get("idLieuExamen"), date.today()))
+        return written
