@@ -13,9 +13,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import smtplib
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Iterable
 
@@ -214,3 +216,74 @@ class State:
     def new_slots(self, slots: list[Slot]) -> list[Slot]:
         seen = self.load()
         return [s for s in slots if s.key not in seen]
+
+
+BASE_URL = "https://portal.stva.zh.ch/ecari-dispoweb"
+PORTAL_UI_URL = f"{BASE_URL}/ui/app/init/"
+
+
+def format_slot_email(slots: Iterable[Slot]) -> tuple[str, str]:
+    ordered = sorted(slots)
+    earliest = ordered[0].date.strftime(DATE_FMT)
+    subject = f"Exam slots: {len(ordered)} new, earliest {earliest}"
+    lines = [f"{s.date.strftime('%a %d.%m.%Y')}  {s.time}  {s.location}" for s in ordered]
+    body = "New free exam slots:\n\n" + "\n".join(lines) + f"\n\nBook at: {PORTAL_UI_URL}\n"
+    return subject, body
+
+
+class Notifier:
+    def __init__(self, smtp: SmtpConfig, dry_run: bool = False):
+        self.smtp = smtp
+        self.dry_run = dry_run
+
+    def send(self, subject: str, body: str) -> None:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = self.smtp.sender
+        msg["To"] = self.smtp.to
+        msg.set_content(body)
+        if self.dry_run:
+            print(f"--- DRY RUN email ---\nSubject: {subject}\n\n{body}", flush=True)
+            return
+        if self.smtp.starttls:
+            with smtplib.SMTP(self.smtp.host, self.smtp.port, timeout=30) as conn:
+                conn.ehlo()
+                conn.starttls()
+                conn.ehlo()
+                if self.smtp.user:
+                    conn.login(self.smtp.user, self.smtp.password)
+                conn.send_message(msg)
+        else:
+            with smtplib.SMTP_SSL(self.smtp.host, self.smtp.port, timeout=30) as conn:
+                if self.smtp.user:
+                    conn.login(self.smtp.user, self.smtp.password)
+                conn.send_message(msg)
+        log.info("email sent: %s", subject)
+
+    def send_slots(self, slots: Iterable[Slot]) -> None:
+        subject, body = format_slot_email(slots)
+        self.send(subject, body)
+
+
+class Alerts:
+    """Operational emails, sent once per condition until that condition clears."""
+
+    def __init__(self, notifier: Notifier):
+        self.notifier = notifier
+        self.active: set[str] = set()
+
+    def raise_(self, name: str, body: str) -> None:
+        if name in self.active:
+            return
+        log.warning("problem (%s): %s", name, body)
+        try:
+            self.notifier.send(f"Exam poller problem: {name}", body)
+        except (smtplib.SMTPException, OSError) as exc:
+            log.error("could not send alert email for %s: %s", name, exc)
+            return
+        self.active.add(name)
+
+    def clear(self, name: str) -> None:
+        if name in self.active:
+            log.info("problem cleared: %s", name)
+        self.active.discard(name)
