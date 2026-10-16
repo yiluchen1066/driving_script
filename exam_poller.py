@@ -10,10 +10,14 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import logging
+import random
 import re
 import smtplib
+import sys
+import time as _time
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -488,3 +492,114 @@ def parse_week(raw: dict, location: str) -> tuple[list[Slot], bool]:
         minute = int(entry.get("minute") or 0)
         slots.append(Slot(date=day, time=f"{hour:02d}:{minute:02d}", location=location))
     return slots, bool(raw.get("nextWeek"))
+
+
+def run_cycle(cfg: Config, portal: Portal, flt: SlotFilter, state: State,
+              notifier: Notifier, alerts: Alerts) -> int:
+    """One poll. Returns the number of new slots emailed. Raises on network or SMTP failure."""
+    captcha, blocked = portal.check_params()
+    if captcha:
+        alerts.raise_("captcha", "The portal has switched the login captcha on. "
+                                 "The poller cannot log in until it is switched off again.")
+        return 0
+    alerts.clear("captcha")
+    if blocked:
+        alerts.raise_("blocked", "The portal reports the private driving-exam service as blocked.")
+        return 0
+    alerts.clear("blocked")
+
+    if not portal.logged_in:
+        try:
+            portal.login()
+        except LoginRejected as exc:
+            alerts.raise_("login", f"Login was rejected with HTTP {exc.status}. "
+                                   "Check candidate_id and birth_date in the config.")
+            return 0
+    alerts.clear("login")
+
+    today = date.today()
+    found: list[Slot] = []
+    for cat in portal.categories():
+        for loc in portal.locations(cat):
+            name = location_name(loc)
+            if not flt.location_matches(name):
+                log.debug("skipping location %s", name)
+                continue
+            slots = portal.free_slots(cat, loc, start=today, until=flt.notify_before,
+                                      max_weeks=cfg.max_weeks)
+            log.info("%s: %d free slot(s) within horizon", name, len(slots))
+            found.extend(slots)
+
+    matches = flt.apply(found)
+    new = state.new_slots(matches)
+    if new:
+        notifier.send_slots(new)
+    state.save(matches)
+    return len(new)
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", default="config.json", help="path to config JSON (default: config.json)")
+    ap.add_argument("--state", default="state.json", help="path to state JSON (default: state.json)")
+    ap.add_argument("--once", action="store_true", help="run a single cycle and exit")
+    ap.add_argument("--dry-run", action="store_true", help="print emails instead of sending them")
+    ap.add_argument("--discover", action="store_true",
+                    help="log in once and save every raw response under discovery/")
+    ap.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    return ap.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    try:
+        cfg = Config.load(args.config)
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+
+    portal = Portal(cfg.candidate_id, cfg.birth_date)
+
+    if args.discover:
+        try:
+            for path in portal.discover(Path("discovery")):
+                print(path)
+        except (requests.RequestException, PortalError) as exc:
+            print(f"discovery failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    notifier = Notifier(cfg.smtp, dry_run=args.dry_run)
+    alerts = Alerts(notifier)
+    flt = SlotFilter(cfg.notify_before, cfg.locations)
+    state = State(args.state)
+    base_delay = cfg.poll_interval_minutes * 60
+    failures = 0
+
+    while True:
+        try:
+            new = run_cycle(cfg, portal, flt, state, notifier, alerts)
+            failures = 0
+            alerts.clear("errors")
+            log.info("cycle done, %d new slot(s)", new)
+        except (requests.RequestException, PortalError) as exc:
+            failures += 1
+            log.warning("cycle failed (%d in a row): %s", failures, exc)
+            portal.logged_in = False
+            if failures >= 5:
+                alerts.raise_("errors", f"{failures} consecutive failures. Last error: {exc}")
+        except (smtplib.SMTPException, OSError) as exc:
+            log.error("email failed, will retry next cycle: %s", exc)
+
+        if args.once:
+            return 0
+        delay = min(base_delay * (2 ** min(failures, 4)), 6 * 3600)
+        delay += random.uniform(0, 0.1 * delay)
+        log.info("next poll in %.0f min", delay / 60)
+        _time.sleep(delay)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
