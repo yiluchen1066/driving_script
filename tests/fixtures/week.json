@@ -1,0 +1,16 @@
+{
+  "retCode": "0000",
+  "retMessage": null,
+  "listeJourHeureLibreDispo": [
+    {
+      "heure": 15,
+      "jour": 1793314800000,
+      "minute": 0
+    }
+  ],
+  "maxDate": 1799881200419,
+  "minDate": 1793314800418,
+  "nextWeek": true,
+  "prevWeek": false,
+  "weekDay": 1793397974151
+}

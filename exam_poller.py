@@ -418,13 +418,26 @@ class Portal:
         """Page week by week from `start` and collect free slots at one location."""
         name = location_name(loc)
         out: list[Slot] = []
+        seen: set[str] = set()
         base = start
         for _ in range(max_weeks):
             raw = self.free_week(cat, loc.get("idLieuExamen"), base)
             slots, has_next = parse_week(raw, name)
-            out.extend(slots)
-            base = base + timedelta(days=7)
-            if not has_next or (until is not None and base > until):
+            for slot in slots:
+                if slot.key not in seen:
+                    seen.add(slot.key)
+                    out.append(slot)
+            # The portal clamps the requested week to its minimum lead time and
+            # reports the week it actually served in weekDay; step on from there.
+            served = raw.get("weekDay")
+            week_start = parse_portal_date(served) if served is not None else base
+            base = max(week_start, base) + timedelta(days=7)
+            if not has_next:
+                break
+            if until is not None and base > until:
+                break
+            max_date = raw.get("maxDate")
+            if max_date is not None and base > parse_portal_date(max_date):
                 break
         return out
 
@@ -454,7 +467,7 @@ class Portal:
         return written
 
 
-_LOCATION_NAME_KEYS = ("nom", "libelle", "designation", "nomLieu", "lieu", "name", "label")
+_LOCATION_NAME_KEYS = ("libelleLieu", "nom", "libelle", "designation", "nomLieu", "lieu", "name", "label")
 
 
 def parse_portal_date(value: Any) -> date:
@@ -479,12 +492,15 @@ def location_name(loc: dict) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     for key, value in loc.items():
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and value.strip() and not key.lower().startswith("id"):
             return value.strip()
     return f"lieu {loc.get('idLieuExamen')}"
 
 
 def parse_week(raw: dict, location: str) -> tuple[list[Slot], bool]:
+    code = raw.get("retCode")
+    if code is not None and str(code) != "0000":
+        raise PortalError(f"portal returned retCode {code}: {raw.get('retMessage')}")
     slots: list[Slot] = []
     for entry in raw.get("listeJourHeureLibreDispo") or []:
         day = parse_portal_date(entry["jour"])
@@ -514,21 +530,33 @@ def run_cycle(cfg: Config, portal: Portal, flt: SlotFilter, state: State,
         except LoginRejected as exc:
             alerts.raise_("login", f"Login was rejected with HTTP {exc.status}. "
                                    "Check candidate_id and birth_date in the config.")
-            return 0
+            raise
     alerts.clear("login")
 
-    today = date.today()
+    today = datetime.now(ZURICH).date()
     found: list[Slot] = []
+    seen_names: list[str] = []
+    matched_locations = 0
     for cat in portal.categories():
         for loc in portal.locations(cat):
             name = location_name(loc)
+            if name not in seen_names:
+                seen_names.append(name)
             if not flt.location_matches(name):
                 log.debug("skipping location %s", name)
                 continue
+            matched_locations += 1
             slots = portal.free_slots(cat, loc, start=today, until=flt.notify_before,
                                       max_weeks=cfg.max_weeks)
-            log.info("%s: %d free slot(s) within horizon", name, len(slots))
+            log.info("%s: %d free slot(s) found", name, len(slots))
             found.extend(slots)
+
+    if flt.locations and matched_locations == 0:
+        alerts.raise_("filter", f"No exam location matched filter.locations={cfg.locations}. "
+                                f"The portal lists: {', '.join(seen_names) or 'nothing'}. "
+                                "Fix the filter in the config.")
+    else:
+        alerts.clear("filter")
 
     matches = flt.apply(found)
     new = state.new_slots(matches)
@@ -552,8 +580,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.handlers[:] = [handler]
+    log.propagate = False
+    log.setLevel(logging.DEBUG if args.verbose else logging.INFO)
     try:
         cfg = Config.load(args.config)
     except ConfigError as exc:
@@ -579,11 +610,16 @@ def main(argv: list[str] | None = None) -> int:
     failures = 0
 
     while True:
+        cycle_ok = False
         try:
             new = run_cycle(cfg, portal, flt, state, notifier, alerts)
+            cycle_ok = True
             failures = 0
             alerts.clear("errors")
             log.info("cycle done, %d new slot(s)", new)
+        except LoginRejected as exc:
+            failures += 1  # back off so bad credentials are not retried at full rate
+            log.warning("login rejected (%d in a row): %s", failures, exc)
         except (requests.RequestException, PortalError) as exc:
             failures += 1
             log.warning("cycle failed (%d in a row): %s", failures, exc)
@@ -592,14 +628,40 @@ def main(argv: list[str] | None = None) -> int:
                 alerts.raise_("errors", f"{failures} consecutive failures. Last error: {exc}")
         except (smtplib.SMTPException, OSError) as exc:
             log.error("email failed, will retry next cycle: %s", exc)
+        except Exception as exc:  # unexpected shape from the portal must not kill the loop
+            failures += 1
+            log.exception("unexpected error in cycle (%d in a row)", failures)
+            portal.logged_in = False
+            if failures >= 5:
+                alerts.raise_("errors", f"{failures} consecutive failures. Last error: {exc!r}")
 
         if args.once:
-            return 0
+            return 0 if cycle_ok else 1
         delay = min(base_delay * (2 ** min(failures, 4)), 6 * 3600)
         delay += random.uniform(0, 0.1 * delay)
         log.info("next poll in %.0f min", delay / 60)
         _time.sleep(delay)
 
+        # Re-read the config so credentials, filter, SMTP settings or the interval
+        # can be fixed in place without restarting the poller.
+        try:
+            fresh = Config.load(args.config)
+        except ConfigError as exc:
+            log.warning("config reload failed, keeping previous values: %s", exc)
+            continue
+        if fresh != cfg:
+            log.info("config changed, applying new values")
+            cfg = fresh
+            portal.candidate_id, portal.birth_date = cfg.candidate_id, cfg.birth_date
+            portal.logged_in = False
+            flt = SlotFilter(cfg.notify_before, cfg.locations)
+            notifier.smtp = cfg.smtp
+            base_delay = cfg.poll_interval_minutes * 60
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("stopped", file=sys.stderr)
+        sys.exit(130)

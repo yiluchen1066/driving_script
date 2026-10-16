@@ -94,3 +94,100 @@ def test_free_slots_respects_max_weeks_without_cutoff():
     p.logged_in = True
     p.free_slots(CAT, LOC, start=date(2026, 10, 19), until=None, max_weeks=3)
     assert len(sess.calls) == 3
+
+
+# --- behaviour pinned by the real portal responses captured with --discover ---
+
+import json
+from pathlib import Path
+
+from exam_poller import PortalError, SlotFilter, portal_datetime, type_body
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def ms(d: date) -> int:
+    """Epoch milliseconds for midnight Zurich on `d`, as the portal encodes dates."""
+    from datetime import datetime
+    from exam_poller import ZURICH
+    return int(datetime.combine(d, datetime.min.time(), tzinfo=ZURICH).timestamp() * 1000)
+
+
+def test_location_name_uses_libelleLieu_and_skips_id_fields():
+    real = {"defaut": True, "idLieuExamen": "AL", "libelleLieu": "Albisgütli", "maxDate": 1799881200401}
+    assert location_name(real) == "Albisgütli"
+    assert location_name({"idLieuExamen": "AL", "something": "Fallback"}) == "Fallback"
+
+
+def test_parse_week_raises_on_error_retcode():
+    with pytest.raises(PortalError, match="9999.*boom"):
+        parse_week({"retCode": "9999", "retMessage": "boom", "listeJourHeureLibreDispo": []}, "X")
+
+
+def test_real_week_fixture_parses():
+    raw = json.loads((FIXTURES / "week.json").read_text(encoding="utf-8"))
+    slots, has_next = parse_week(raw, "Bassersdorf")
+    assert slots == [Slot(date(2026, 10, 30), "15:00", "Bassersdorf")]
+    assert has_next is True
+
+
+def test_real_locations_fixture_names_and_filter():
+    locs = json.loads((FIXTURES / "locations.json").read_text(encoding="utf-8"))
+    names = [location_name(l) for l in locs]
+    assert names == ["Albisgütli", "Bülach", "Bassersdorf", "Hinwil", "Regensdorf", "Winterthur"]
+    f = SlotFilter(None, ["Albisguetli"])
+    assert [n for n in names if f.location_matches(n)] == ["Albisgütli"]
+
+
+def test_real_category_fixture_builds_request_body():
+    cat = json.loads((FIXTURES / "categories.json").read_text(encoding="utf-8"))[0]
+    body = type_body(cat)
+    assert body["typeCategorieLieuDispo"] == {
+        "idGroupeExamen": None, "idCategorie": "B", "idTypeExamen": "PRATIQUEAUTO", "idGenreExamen": "01PAL",
+    }
+    assert body["rendezVous"] is None
+
+
+def served_week(days: list[date], week_day: date, has_next: bool = True, max_date: date | None = None) -> FakeResponse:
+    payload = {
+        "retCode": "0000", "retMessage": None,
+        "listeJourHeureLibreDispo": [{"jour": ms(d), "heure": 8, "minute": 0} for d in days],
+        "nextWeek": has_next, "prevWeek": False, "weekDay": ms(week_day),
+    }
+    if max_date is not None:
+        payload["maxDate"] = ms(max_date)
+    return FakeResponse(200, payload)
+
+
+def test_free_slots_advances_from_the_week_the_server_actually_served():
+    # The portal clamps the requested week to a minimum lead time and reports the
+    # served week in `weekDay`; the next request must be seven days after that.
+    sess = FakeSession({WEEK: [
+        served_week([date(2026, 10, 30)], week_day=date(2026, 10, 30)),
+        served_week([], week_day=date(2026, 11, 6)),
+    ]})
+    p = Portal("1", "01.01.1990", session=sess)
+    p.logged_in = True
+    slots = p.free_slots(CAT, LOC, start=date(2026, 10, 19), until=None, max_weeks=2)
+    assert [s.date for s in slots] == [date(2026, 10, 30)]
+    bases = [c[2]["typeCategorieLieuDispo"]["dateBase"] for c in sess.calls]
+    assert bases == [portal_datetime(date(2026, 10, 19)), portal_datetime(date(2026, 11, 6))]
+
+
+def test_free_slots_stops_past_the_servers_max_date():
+    sess = FakeSession({WEEK: [served_week([], week_day=date(2026, 10, 30), max_date=date(2026, 11, 1))]})
+    p = Portal("1", "01.01.1990", session=sess)
+    p.logged_in = True
+    p.free_slots(CAT, LOC, start=date(2026, 10, 19), until=None, max_weeks=12)
+    assert len(sess.calls) == 1
+
+
+def test_free_slots_dedupes_a_week_served_twice():
+    sess = FakeSession({WEEK: [
+        served_week([date(2026, 10, 30)], week_day=date(2026, 10, 30)),
+        served_week([date(2026, 10, 30)], week_day=date(2026, 10, 30)),
+    ]})
+    p = Portal("1", "01.01.1990", session=sess)
+    p.logged_in = True
+    slots = p.free_slots(CAT, LOC, start=date(2026, 10, 19), until=None, max_weeks=2)
+    assert len(slots) == 1

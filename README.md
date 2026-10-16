@@ -36,10 +36,21 @@ cp config.example.json config.json   # then edit it
 .venv/bin/python exam_poller.py        # loops forever, Ctrl-C to stop
 ```
 
-Keep it alive with `tmux`, `nohup`, or a launchd job calling `--once` on a schedule.
+Keep it alive with `tmux` or `nohup`, for example:
+
+```bash
+nohup .venv/bin/python exam_poller.py >> poller.log 2>&1 &
+```
+
+The config is re-read every cycle, so credentials, the filter, SMTP settings
+or the interval can be fixed in place without a restart. Logs go to stdout.
 
 The script emails you once per new slot set, and once per problem (captcha
-switched on, login rejected, repeated request failures) until that problem clears.
+switched on, service blocked, login rejected, filter matching no location,
+repeated request failures) until that problem clears. Problem memory lives in
+the process, so `--once` under cron re-sends a standing problem on every run
+and does not back off; prefer the loop for unattended use. `--once` exits 1
+when the cycle failed.
 
 ## Tests
 

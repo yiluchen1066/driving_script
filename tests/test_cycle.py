@@ -4,7 +4,7 @@ from datetime import date
 import pytest
 
 import exam_poller
-from exam_poller import Alerts, Config, Notifier, Portal, SlotFilter, SmtpConfig, State, run_cycle
+from exam_poller import Alerts, Config, LoginRejected, Notifier, Portal, SlotFilter, SmtpConfig, State, run_cycle
 from tests.fakes import FakeResponse, FakeSession
 
 LOGIN = ("POST", "/login/loginConduitePrive/de")
@@ -76,14 +76,30 @@ def test_cycle_skips_and_alerts_when_captcha_on(tmp_path):
     assert LOGIN not in sess.paths()
 
 
-def test_cycle_alerts_once_on_login_rejected(tmp_path):
+def test_cycle_alerts_once_on_login_rejected_and_raises_so_the_loop_backs_off(tmp_path):
     parts, sess, sent = build(tmp_path, {
         PARAM: [FakeResponse(200, OFF)],
         LOGIN: [FakeResponse(401, {})],
     })
-    run_cycle(**parts)
-    run_cycle(**parts)
+    with pytest.raises(LoginRejected):
+        run_cycle(**parts)
+    with pytest.raises(LoginRejected):
+        run_cycle(**parts)
     assert [s for s, _ in sent.items] == ["Exam poller problem: login"]
+
+
+def test_cycle_alerts_once_when_no_location_matches_the_filter(tmp_path):
+    parts, sess, sent = build(tmp_path, {
+        PARAM: [FakeResponse(200, OFF)],
+        LOGIN: [FakeResponse(200, {})],
+        CATS: [FakeResponse(200, [CAT])],
+        LIEUX: [FakeResponse(200, [ALBIS, WINTI])],
+    }, config=cfg(locations=("Nowhere",)))
+    assert run_cycle(**parts) == 0
+    assert run_cycle(**parts) == 0
+    assert [s for s, _ in sent.items] == ["Exam poller problem: filter"]
+    assert "Zürich-Albisgüetli" in sent.items[0][1] and "Winterthur" in sent.items[0][1]
+    assert WEEK not in sess.paths()
 
 
 def test_smtp_failure_leaves_state_untouched_so_slots_realert(tmp_path):

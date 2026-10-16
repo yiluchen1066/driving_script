@@ -1,0 +1,38 @@
+[
+  {
+    "defaut": true,
+    "idLieuExamen": "AL",
+    "libelleLieu": "Albisgütli",
+    "maxDate": 1799881200401
+  },
+  {
+    "defaut": false,
+    "idLieuExamen": "BU",
+    "libelleLieu": "Bülach",
+    "maxDate": 1799881200401
+  },
+  {
+    "defaut": false,
+    "idLieuExamen": "GT",
+    "libelleLieu": "Bassersdorf",
+    "maxDate": 1799881200401
+  },
+  {
+    "defaut": false,
+    "idLieuExamen": "HI",
+    "libelleLieu": "Hinwil",
+    "maxDate": 1799881200401
+  },
+  {
+    "defaut": false,
+    "idLieuExamen": "RE",
+    "libelleLieu": "Regensdorf",
+    "maxDate": 1799881200401
+  },
+  {
+    "defaut": false,
+    "idLieuExamen": "WI",
+    "libelleLieu": "Winterthur",
+    "maxDate": 1799881200401
+  }
+]
