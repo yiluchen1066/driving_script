@@ -74,8 +74,10 @@ Required request headers: a full Chrome `User-Agent`,
 - `birth_date` is `dd.mm.yyyy`, passed to the portal unchanged.
 - `notify_before` empty means no date limit. Otherwise `dd.mm.yyyy`, inclusive.
 - `locations` empty means any location. Otherwise each entry is matched as a
-  case-insensitive substring of the portal's location name, after normalising
-  `ä/ö/ü` to `ae/oe/ue` on both sides, so `Albisguetli` matches `Albisgüetli`.
+  case-insensitive substring of the portal's location name after both sides are
+  folded: diacritics stripped (`ü → u`), `ß → ss`, and a vowel followed by one
+  or more `e` collapsed (`ue → u`), so `Albisguetli`, `Albisgueetli` and
+  `Albisgüetli` all compare equal, as do `Zuerich` and `Zürich`.
 - `poll_interval_minutes` default 60. A small random jitter (up to 10 %) is
   added each cycle.
 - `max_weeks` default 12. The free-slot endpoint returns one week per call

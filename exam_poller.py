@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from typing import Iterable
 
 log = logging.getLogger("exam_poller")
 
@@ -137,3 +140,46 @@ def _check_date(text: str, name: str) -> None:
         parse_date(text)
     except ValueError:
         raise ConfigError(f"{name} must be dd.mm.yyyy, got {text!r}") from None
+
+
+_VOWEL_E = re.compile(r"([aou])e+")
+
+
+def normalise(text: str) -> str:
+    """Fold a place name so that common spellings compare equal:
+    'Albisgüetli', 'Albisguetli' and 'Albisgueetli' all become 'albisgutli',
+    'Zürich' and 'Zuerich' both become 'zurich'. Case-insensitive."""
+    decomposed = unicodedata.normalize("NFD", text).casefold()
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return _VOWEL_E.sub(r"\1", stripped)
+
+
+@dataclass(frozen=True, order=True)
+class Slot:
+    date: date
+    time: str
+    location: str
+
+    @property
+    def key(self) -> str:
+        return f"{self.location}|{self.date.isoformat()}|{self.time}"
+
+
+class SlotFilter:
+    def __init__(self, notify_before: date | None, locations: list[str]):
+        self.notify_before = notify_before
+        self.locations = [normalise(name) for name in locations if name.strip()]
+
+    def location_matches(self, name: str) -> bool:
+        if not self.locations:
+            return True
+        folded = normalise(name)
+        return any(wanted in folded for wanted in self.locations)
+
+    def slot_matches(self, slot: Slot) -> bool:
+        if self.notify_before is not None and slot.date > self.notify_before:
+            return False
+        return self.location_matches(slot.location)
+
+    def apply(self, slots: Iterable[Slot]) -> list[Slot]:
+        return sorted(s for s in slots if self.slot_matches(s))
