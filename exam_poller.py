@@ -574,6 +574,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--dry-run", action="store_true", help="print emails instead of sending them")
     ap.add_argument("--discover", action="store_true",
                     help="log in once and save every raw response under discovery/")
+    ap.add_argument("--test-email", action="store_true",
+                    help="send one test email with the configured SMTP settings and exit")
     ap.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return ap.parse_args(argv)
 
@@ -590,6 +592,19 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
+
+    if args.test_email:
+        try:
+            Notifier(cfg.smtp).send(
+                "Exam poller test email",
+                f"If you can read this, the poller can reach you.\n"
+                f"SMTP host {cfg.smtp.host}:{cfg.smtp.port}, from {cfg.smtp.sender}, to {cfg.smtp.to}.\n",
+            )
+        except (smtplib.SMTPException, OSError) as exc:
+            print(f"test email FAILED: {exc!r}", file=sys.stderr)
+            return 1
+        print(f"test email sent to {cfg.smtp.to} via {cfg.smtp.host}:{cfg.smtp.port}")
+        return 0
 
     portal = Portal(cfg.candidate_id, cfg.birth_date)
 

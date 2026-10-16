@@ -26,6 +26,7 @@ cp config.example.json config.json   # then edit it
 ## First run
 
 ```bash
+.venv/bin/python exam_poller.py --test-email    # one real email through your SMTP settings
 .venv/bin/python exam_poller.py --discover      # saves raw responses under discovery/
 .venv/bin/python exam_poller.py --once --dry-run
 ```
