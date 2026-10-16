@@ -31,7 +31,7 @@ appear in code.
 | 1 | `POST /login/loginConduitePrive/de` | Body `{"noRegistre": "<digits>", "dateNaissance": "dd.mm.yyyy", "captcha": ""}`. 401 = bad credentials, 403 = blocked. Response has `personneDispo`, `examTypes`. |
 | 2 | `GET /personne/listCatPossible` | Candidate's exam categories: `idGroupeExamen`, `categorie`, `idTypeExamen`, `idGenreExamen`, `rendezVous`. |
 | 3 | `POST /lieu-examen/listeLieu` | Body `{"typeCategorieLieuDispo": {idGroupeExamen, idCategorie, idTypeExamen, idGenreExamen}, "rendezVous": ...}`. Returns exam locations (`idLieuExamen`, name). |
-| 4 | `POST /lieu-examen/listeJourHeureLibre` | Body adds `dateBase` and `idLieuExamen`. Returns free days and times. Polling target. |
+| 4 | `POST /lieu-examen/listeJourHeureLibre` | Body adds `dateBase` (ISO date-time, as the browser's `Date.toJSON()`) and `idLieuExamen`. Returns one week: `{listeJourHeureLibreDispo: [{jour, heure, minute}], prevWeek, nextWeek, weekDay}`. Polling target. |
 | — | `GET /login/restoreUserSession/{appName}` | Exists; optional for session restore. |
 
 Exact response shapes for steps 2–4 are unknown until an authenticated run.
@@ -65,7 +65,8 @@ Required request headers: a full Chrome `User-Agent`,
   "filter": {"notify_before": "", "locations": ["Albisguetli"]},
   "smtp": {"host": "smtp.example.ch", "port": 587, "user": "", "password": "",
            "from": "me@example.ch", "to": "me@example.ch", "starttls": true},
-  "poll_interval_minutes": 60
+  "poll_interval_minutes": 60,
+  "max_weeks": 12
 }
 ```
 
@@ -77,6 +78,11 @@ Required request headers: a full Chrome `User-Agent`,
   `ä/ö/ü` to `ae/oe/ue` on both sides, so `Albisguetli` matches `Albisgüetli`.
 - `poll_interval_minutes` default 60. A small random jitter (up to 10 %) is
   added each cycle.
+- `max_weeks` default 12. The free-slot endpoint returns one week per call
+  (`listeJourHeureLibreDispo`, `prevWeek`, `nextWeek`, `weekDay`), so the
+  poller pages week by week from today. It stops at the week containing
+  `notify_before`, or after `max_weeks` weeks when no cutoff is set, or when
+  the portal reports no further week.
 
 Config loading validates presence and format of every field and exits with a
 clear message on error.
