@@ -183,3 +183,34 @@ class SlotFilter:
 
     def apply(self, slots: Iterable[Slot]) -> list[Slot]:
         return sorted(s for s in slots if self.slot_matches(s))
+
+
+class State:
+    """Keys of the slots emailed in the previous cycle, kept in a small JSON file."""
+
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+
+    def load(self) -> set[str]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return set()
+        except json.JSONDecodeError:
+            log.warning("state file %s is not valid JSON, starting fresh", self.path)
+            return set()
+        if not isinstance(data, dict) or not isinstance(data.get("notified"), list):
+            log.warning("state file %s has unexpected shape, starting fresh", self.path)
+            return set()
+        return {str(k) for k in data["notified"]}
+
+    def save(self, slots: Iterable[Slot]) -> None:
+        payload = {
+            "notified": sorted(s.key for s in slots),
+            "updated": datetime.now().isoformat(timespec="seconds"),
+        }
+        self.path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def new_slots(self, slots: list[Slot]) -> list[Slot]:
+        seen = self.load()
+        return [s for s in slots if s.key not in seen]
