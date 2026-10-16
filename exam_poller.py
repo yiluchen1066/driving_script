@@ -410,6 +410,20 @@ class Portal:
         body = type_body(cat, dateBase=portal_datetime(base), idLieuExamen=id_lieu)
         return self.post("/lieu-examen/listeJourHeureLibre", body)
 
+    def free_slots(self, cat: dict, loc: dict, start: date, until: date | None, max_weeks: int) -> list[Slot]:
+        """Page week by week from `start` and collect free slots at one location."""
+        name = location_name(loc)
+        out: list[Slot] = []
+        base = start
+        for _ in range(max_weeks):
+            raw = self.free_week(cat, loc.get("idLieuExamen"), base)
+            slots, has_next = parse_week(raw, name)
+            out.extend(slots)
+            base = base + timedelta(days=7)
+            if not has_next or (until is not None and base > until):
+                break
+        return out
+
     # -- discovery -----------------------------------------------------------
 
     def discover(self, out_dir: Path) -> list[Path]:
@@ -434,3 +448,43 @@ class Portal:
             for j, loc in enumerate(locs):
                 dump(f"4_week_cat{i}_loc{j}", self.free_week(cat, loc.get("idLieuExamen"), date.today()))
         return written
+
+
+_LOCATION_NAME_KEYS = ("nom", "libelle", "designation", "nomLieu", "lieu", "name", "label")
+
+
+def parse_portal_date(value: Any) -> date:
+    """Accept the date encodings a Java backend may emit and return the Zurich calendar date."""
+    if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit()):
+        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).astimezone(ZURICH).date()
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    # Jackson's default offset form is +0200; fromisoformat wants +02:00.
+    if len(text) >= 5 and text[-5] in "+-" and text[-4:].isdigit():
+        text = text[:-2] + ":" + text[-2:]
+    parsed = datetime.fromisoformat(text)  # raises ValueError on garbage
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(ZURICH)
+    return parsed.date()
+
+
+def location_name(loc: dict) -> str:
+    for key in _LOCATION_NAME_KEYS:
+        value = loc.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key, value in loc.items():
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return f"lieu {loc.get('idLieuExamen')}"
+
+
+def parse_week(raw: dict, location: str) -> tuple[list[Slot], bool]:
+    slots: list[Slot] = []
+    for entry in raw.get("listeJourHeureLibreDispo") or []:
+        day = parse_portal_date(entry["jour"])
+        hour = int(entry.get("heure") or 0)
+        minute = int(entry.get("minute") or 0)
+        slots.append(Slot(date=day, time=f"{hour:02d}:{minute:02d}", location=location))
+    return slots, bool(raw.get("nextWeek"))
