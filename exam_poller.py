@@ -227,6 +227,7 @@ class State:
 
 BASE_URL = "https://portal.stva.zh.ch/ecari-dispoweb"
 PORTAL_UI_URL = f"{BASE_URL}/ui/app/init/"
+BOOKING_URL = f"{PORTAL_UI_URL}#/conduite/prive/login"
 
 
 def format_slot_email(slots: Iterable[Slot]) -> tuple[str, str]:
@@ -234,7 +235,7 @@ def format_slot_email(slots: Iterable[Slot]) -> tuple[str, str]:
     earliest = ordered[0].date.strftime(DATE_FMT)
     subject = f"Exam slots: {len(ordered)} new, earliest {earliest}"
     lines = [f"{s.date.strftime('%a %d.%m.%Y')}  {s.time}  {s.location}" for s in ordered]
-    body = "New free exam slots:\n\n" + "\n".join(lines) + f"\n\nBook at: {PORTAL_UI_URL}\n"
+    body = "New free exam slots:\n\n" + "\n".join(lines) + f"\n\nBook at: {BOOKING_URL}\n"
     return subject, body
 
 

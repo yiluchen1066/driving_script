@@ -57,7 +57,7 @@ def test_format_slot_email_subject_and_body():
     assert subject == "Exam slots: 2 new, earliest 10.11.2026"
     assert "Tue 10.11.2026  08:00  Zürich-Albisgüetli" in body
     assert body.index("10.11.2026") < body.index("20.11.2026")
-    assert exam_poller.PORTAL_UI_URL in body
+    assert "Book at: https://portal.stva.zh.ch/ecari-dispoweb/ui/app/init/#/conduite/prive/login" in body
 
 
 def test_send_uses_starttls_and_login():
