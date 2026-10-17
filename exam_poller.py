@@ -575,13 +575,17 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--discover", action="store_true",
                     help="log in once and save every raw response under discovery/")
     ap.add_argument("--test-email", action="store_true",
-                    help="send one test email with the configured SMTP settings and exit")
+                    help="send a sample vacancy email with the configured SMTP settings and exit")
     ap.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return ap.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    try:  # Windows consoles and redirected files default to a legacy code page
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.handlers[:] = [handler]
@@ -594,14 +598,24 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.test_email:
+        today = datetime.now(ZURICH).date()
+        where = "Albisgütli"
+        if cfg.locations and normalise(cfg.locations[0]) != normalise(where):
+            where = cfg.locations[0]
+        sample = [
+            Slot(today + timedelta(days=14), "08:00", where),
+            Slot(today + timedelta(days=18), "13:30", where),
+            Slot(today + timedelta(days=27), "10:00", where),
+        ]
+        subject, body = format_slot_email(sample)
+        body = ("This is a test. A real notification looks exactly like this, without the "
+                "[TEST] tag, and lists only slots that are actually free.\n\n" + body)
         try:
-            Notifier(cfg.smtp).send(
-                "Exam poller test email",
-                f"If you can read this, the poller can reach you.\n"
-                f"SMTP host {cfg.smtp.host}:{cfg.smtp.port}, from {cfg.smtp.sender}, to {cfg.smtp.to}.\n",
-            )
+            Notifier(cfg.smtp).send("[TEST] " + subject, body)
         except (smtplib.SMTPException, OSError) as exc:
             print(f"test email FAILED: {exc!r}", file=sys.stderr)
+            if "gmail" in cfg.smtp.host and "535" not in repr(exc):
+                print("hint: Gmail needs a 16-letter App Password, not your normal password", file=sys.stderr)
             return 1
         print(f"test email sent to {cfg.smtp.to} via {cfg.smtp.host}:{cfg.smtp.port}")
         return 0

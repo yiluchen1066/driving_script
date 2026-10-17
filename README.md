@@ -1,59 +1,151 @@
 # Exam slot poller
 
 Polls the Strassenverkehrsamt Zürich appointment portal for free practical
-driving-exam slots and emails you when a new one matches your filter.
+driving-exam slots and emails you when a new slot appears at the exam
+location you care about (default: Albisgütli). Checks once an hour, remembers
+what it already told you, and emails you once per problem if something stops
+working (captcha switched on, login rejected, mail failure).
 
-## Setup
+Works on macOS, Linux and Windows. Needs Python 3.11 or newer.
+
+## 1. Install
+
+macOS / Linux (Terminal):
 
 ```bash
+git clone https://github.com/yiluchen1066/driving_script.git
+cd driving_script
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-cp config.example.json config.json   # then edit it
+cp config.example.json config.json
 ```
 
-`config.json` is gitignored. Fields:
+Windows (PowerShell, with Python from python.org installed):
 
-| Field | Meaning |
+```powershell
+git clone https://github.com/yiluchen1066/driving_script.git
+cd driving_script
+py -3 -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+copy config.example.json config.json
+```
+
+Every command below is run from inside the `driving_script` folder. On
+macOS/Linux use `.venv/bin/python`, on Windows use `.venv\Scripts\python`.
+
+## 2. Configure `config.json`
+
+`config.json` holds your credentials and is ignored by git. Never put real
+values into `config.example.json`, which is committed.
+
+| Field | Value |
 |---|---|
-| `credentials.candidate_id` | the digits you type into the portal's login |
+| `credentials.candidate_id` | the number you type into the portal login, digits only |
 | `credentials.birth_date` | `dd.mm.yyyy` |
-| `filter.notify_before` | only alert for slots on or before this date; empty = no cutoff |
-| `filter.locations` | substrings of exam locations, umlaut-insensitive; empty = all |
-| `smtp.*` | your mail server; `starttls: true` for port 587, `false` for SSL on 465 |
-| `poll_interval_minutes` | default 60 |
-| `max_weeks` | how far ahead to look when no cutoff is set, default 12 |
+| `filter.locations` | exam locations to watch, e.g. `["Albisguetli"]`; spelling with or without umlaut both work; `[]` = all locations |
+| `filter.notify_before` | only alert for slots on or before this date, `dd.mm.yyyy`; `""` = no limit |
+| `smtp.host` / `smtp.port` / `smtp.starttls` | for Gmail: `smtp.gmail.com`, `587`, `true` |
+| `smtp.user` / `smtp.from` | the Gmail address that sends |
+| `smtp.password` | a Gmail App Password (see below), not your normal password |
+| `smtp.to` | where the alerts go; can be any address |
+| `poll_interval_minutes` | how often to check, default `60` |
+| `max_weeks` | how far ahead to look when `notify_before` is empty, default `12` |
 
-## First run
+Gmail App Password: open https://myaccount.google.com/security and turn on
+2-Step Verification, then open https://myaccount.google.com/apppasswords,
+create one named for example "exam poller", and paste the 16-letter code into
+`smtp.password`. Spaces in the code can stay or go.
+
+The config is re-read before every poll, so you can edit it while the
+poller runs. No restart needed.
+
+## 3. Test the email
+
+Sends one email in exactly the format of a real alert, tagged `[TEST]`:
 
 ```bash
-.venv/bin/python exam_poller.py --test-email    # one real email through your SMTP settings
-.venv/bin/python exam_poller.py --discover      # saves raw responses under discovery/
-.venv/bin/python exam_poller.py --once --dry-run
+.venv/bin/python exam_poller.py --test-email          # macOS / Linux
+.venv\Scripts\python exam_poller.py --test-email      # Windows
 ```
 
-## Run
+Prints `test email sent to ...` on success, otherwise the SMTP error.
+"535 Username and Password not accepted" from Gmail means the password is
+not an App Password.
+
+## 4. Test the portal access
+
+Logs in, looks up the slots, prints what it would email, sends nothing:
 
 ```bash
-.venv/bin/python exam_poller.py        # loops forever, Ctrl-C to stop
+.venv/bin/python exam_poller.py --once --dry-run -v
 ```
 
-Keep it alive with `tmux` or `nohup`, for example:
+You should see `logged in`, one line per watched location with a slot count,
+and `cycle done`. A `login rejected with HTTP 401` means `candidate_id` or
+`birth_date` is wrong.
+
+## 5. Start and stop
+
+The poller is a long-running process. The machine must stay on and awake
+(adjust sleep settings), and the terminal or window it was started from can be
+closed when started as shown here.
+
+macOS / Linux:
 
 ```bash
 nohup .venv/bin/python exam_poller.py >> poller.log 2>&1 &
+tail -f poller.log              # watch
+pkill -f exam_poller.py         # stop
 ```
 
-The config is re-read every cycle, so credentials, the filter, SMTP settings
-or the interval can be fixed in place without a restart. Logs go to stdout.
+Windows (PowerShell):
 
-The script emails you once per new slot set, and once per problem (captcha
-switched on, service blocked, login rejected, filter matching no location,
-repeated request failures) until that problem clears. Problem memory lives in
-the process, so `--once` under cron re-sends a standing problem on every run
-and does not back off; prefer the loop for unattended use. `--once` exits 1
-when the cycle failed.
+```powershell
+$p = Start-Process -FilePath .\.venv\Scripts\python.exe -ArgumentList "exam_poller.py" `
+       -WorkingDirectory (Get-Location) -WindowStyle Hidden -PassThru `
+       -RedirectStandardOutput poller.log -RedirectStandardError poller.err.log
+$p.Id | Out-File poller.pid
+Get-Content poller.log -Wait             # watch
+Stop-Process -Id (Get-Content poller.pid) # stop
+```
 
-## Tests
+If `poller.pid` is lost, stop it via Task Manager (a `python.exe` whose
+command line contains `exam_poller.py`) or with:
+
+```powershell
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*exam_poller.py*" } | ForEach-Object { Stop-Process -Id $_.ProcessId }
+```
+
+Is it running? Look for a fresh `next poll in ... min` line at the end of
+`poller.log`.
+
+## 6. What you will receive
+
+- A slot email whenever new matching slots appear, subject
+  `Exam slots: N new, earliest dd.mm.yyyy`, listing date, time and location.
+  Slots already reported are not repeated; a slot that disappears and comes
+  back is reported again.
+- A problem email, once per problem until it clears: captcha switched on by
+  the portal, portal service blocked, login rejected, no location matching
+  your filter, five failed polls in a row. The poller keeps running and backs
+  off up to six hours between attempts while a problem persists.
+
+Booking itself is not automated: open the portal link in the email and book.
+
+## Other flags
+
+| Flag | Purpose |
+|---|---|
+| `--once` | one poll and exit; exit code 1 if the poll failed |
+| `--dry-run` | print emails instead of sending |
+| `--discover` | save the raw portal responses under `discovery/` for debugging |
+| `--config PATH`, `--state PATH` | use other file locations |
+| `-v` | debug logging |
+
+Files created while running: `state.json` (slots already reported),
+`poller.log`. Both are ignored by git.
+
+## Development
 
 ```bash
 .venv/bin/pytest -q
