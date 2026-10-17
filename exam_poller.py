@@ -667,7 +667,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.once:
             return 0 if cycle_ok else 1
-        delay = min(base_delay * (2 ** min(failures, 4)), 6 * 3600)
+        if failures == 1:
+            delay = 120  # quick retry: the network is often just not back yet after sleep
+        else:
+            delay = min(base_delay * (2 ** min(failures - 1, 4)), 6 * 3600)
         delay += random.uniform(0, 0.1 * delay)
         log.info("next poll in %.0f min", delay / 60)
         _time.sleep(delay)

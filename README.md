@@ -86,9 +86,13 @@ and `cycle done`. A `login rejected with HTTP 401` means `candidate_id` or
 
 ## 5. Start and stop
 
-The poller is a long-running process. The machine must stay on and awake
-(adjust sleep settings), and the terminal or window it was started from can be
-closed when started as shown here.
+The poller is a long-running process. The machine must stay on and awake:
+while it sleeps no polling happens. On Windows set Settings > System > Power >
+Sleep to Never when plugged in (screen off is fine); on a Mac enable "Prevent
+automatic sleeping on power adapter when the display is off" under Battery >
+Options. The terminal or window it was started from can be closed when started
+as shown here. A failed poll is retried after two minutes, then with
+increasing gaps up to six hours.
 
 macOS / Linux:
 
