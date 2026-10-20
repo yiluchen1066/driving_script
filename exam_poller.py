@@ -61,6 +61,7 @@ class Config:
     smtp: SmtpConfig
     poll_interval_minutes: int = 60
     max_weeks: int = 12
+    notify_after: date | None = None
 
     @classmethod
     def load(cls, path: Path | str) -> "Config":
@@ -90,6 +91,11 @@ class Config:
         if cutoff_text:
             _check_date(cutoff_text, "filter.notify_before")
             notify_before = parse_date(cutoff_text)
+        start_text = str(filt.get("notify_after") or "").strip()
+        notify_after = None
+        if start_text:
+            _check_date(start_text, "filter.notify_after")
+            notify_after = parse_date(start_text)
         locations = filt.get("locations") or []
         if not isinstance(locations, list) or not all(isinstance(x, str) for x in locations):
             raise ConfigError("filter.locations must be a list of strings")
@@ -120,6 +126,7 @@ class Config:
             smtp=smtp,
             poll_interval_minutes=interval,
             max_weeks=max_weeks,
+            notify_after=notify_after,
         )
 
 
@@ -175,8 +182,10 @@ class Slot:
 
 
 class SlotFilter:
-    def __init__(self, notify_before: date | None, locations: list[str]):
+    def __init__(self, notify_before: date | None, locations: list[str],
+                 notify_after: date | None = None):
         self.notify_before = notify_before
+        self.notify_after = notify_after
         self.locations = [normalise(name) for name in locations if name.strip()]
 
     def location_matches(self, name: str) -> bool:
@@ -186,6 +195,8 @@ class SlotFilter:
         return any(wanted in folded for wanted in self.locations)
 
     def slot_matches(self, slot: Slot) -> bool:
+        if self.notify_after is not None and slot.date < self.notify_after:
+            return False
         if self.notify_before is not None and slot.date > self.notify_before:
             return False
         return self.location_matches(slot.location)
@@ -535,6 +546,7 @@ def run_cycle(cfg: Config, portal: Portal, flt: SlotFilter, state: State,
     alerts.clear("login")
 
     today = datetime.now(ZURICH).date()
+    start = max(today, flt.notify_after) if flt.notify_after is not None else today
     found: list[Slot] = []
     seen_names: list[str] = []
     matched_locations = 0
@@ -547,7 +559,7 @@ def run_cycle(cfg: Config, portal: Portal, flt: SlotFilter, state: State,
                 log.debug("skipping location %s", name)
                 continue
             matched_locations += 1
-            slots = portal.free_slots(cat, loc, start=today, until=flt.notify_before,
+            slots = portal.free_slots(cat, loc, start=start, until=flt.notify_before,
                                       max_weeks=cfg.max_weeks)
             log.info("%s: %d free slot(s) found", name, len(slots))
             found.extend(slots)
@@ -634,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:
 
     notifier = Notifier(cfg.smtp, dry_run=args.dry_run)
     alerts = Alerts(notifier)
-    flt = SlotFilter(cfg.notify_before, cfg.locations)
+    flt = SlotFilter(cfg.notify_before, cfg.locations, cfg.notify_after)
     state = State(args.state)
     base_delay = cfg.poll_interval_minutes * 60
     failures = 0
@@ -687,7 +699,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg = fresh
             portal.candidate_id, portal.birth_date = cfg.candidate_id, cfg.birth_date
             portal.logged_in = False
-            flt = SlotFilter(cfg.notify_before, cfg.locations)
+            flt = SlotFilter(cfg.notify_before, cfg.locations, cfg.notify_after)
             notifier.smtp = cfg.smtp
             base_delay = cfg.poll_interval_minutes * 60
 

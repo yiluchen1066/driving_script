@@ -39,6 +39,21 @@ def test_cutoff_is_inclusive():
     assert not f.slot_matches(slot(date(2026, 12, 1)))
 
 
+def test_start_date_is_inclusive():
+    f = SlotFilter(None, [], notify_after=date(2026, 11, 30))
+    assert not f.slot_matches(slot(date(2026, 11, 29)))
+    assert f.slot_matches(slot(date(2026, 11, 30)))
+    assert f.slot_matches(slot(date(2026, 12, 1)))
+
+
+def test_start_and_end_dates_are_both_inclusive():
+    f = SlotFilter(date(2026, 11, 30), [], notify_after=date(2026, 11, 1))
+    assert not f.slot_matches(slot(date(2026, 10, 31)))
+    assert f.slot_matches(slot(date(2026, 11, 1)))
+    assert f.slot_matches(slot(date(2026, 11, 30)))
+    assert not f.slot_matches(slot(date(2026, 12, 1)))
+
+
 def test_no_cutoff_passes_any_date():
     assert SlotFilter(None, []).slot_matches(slot(date(2030, 1, 1)))
 

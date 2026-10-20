@@ -29,10 +29,10 @@ class Sent:
         self.items.append((subject, body))
 
 
-def cfg(notify_before=None, locations=("Albisguetli",)) -> Config:
+def cfg(notify_before=None, locations=("Albisguetli",), notify_after=None) -> Config:
     return Config(candidate_id="1", birth_date="01.01.1990", notify_before=notify_before,
                   locations=list(locations), smtp=SmtpConfig("h", 587, "", "", "a@b", "a@b"),
-                  poll_interval_minutes=60, max_weeks=12)
+                  poll_interval_minutes=60, max_weeks=12, notify_after=notify_after)
 
 
 def build(tmp_path, routes, config=None):
@@ -42,7 +42,8 @@ def build(tmp_path, routes, config=None):
     notifier = Notifier(config.smtp)
     sent = Sent()
     notifier.send = sent
-    return dict(cfg=config, portal=portal, flt=SlotFilter(config.notify_before, config.locations),
+    return dict(cfg=config, portal=portal,
+                flt=SlotFilter(config.notify_before, config.locations, config.notify_after),
                 state=State(tmp_path / "state.json"), notifier=notifier, alerts=Alerts(notifier)), sess, sent
 
 
@@ -65,6 +66,21 @@ def test_cycle_emails_new_matching_slots_only_once(tmp_path):
     assert sum(1 for m, p, _ in sess.calls if (m, p) == WEEK) == 1
     assert run_cycle(**parts) == 0
     assert len(sent.items) == 1
+
+
+def test_cycle_starts_slot_search_on_notify_after_date(tmp_path):
+    after = date(2026, 11, 1)
+    config = cfg(notify_after=after)
+    parts, sess, _ = build(tmp_path, {
+        PARAM: [FakeResponse(200, OFF)],
+        LOGIN: [FakeResponse(200, {})],
+        CATS: [FakeResponse(200, [CAT])],
+        LIEUX: [FakeResponse(200, [ALBIS])],
+        WEEK: [week(["2026-11-10"])],
+    }, config=config)
+    run_cycle(**parts)
+    request = next(call for call in sess.calls if call[:2] == WEEK)
+    assert request[2]["typeCategorieLieuDispo"]["dateBase"] == exam_poller.portal_datetime(after)
 
 
 def test_cycle_skips_and_alerts_when_captcha_on(tmp_path):

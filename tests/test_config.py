@@ -17,6 +17,7 @@ def test_example_config_loads():
     cfg = Config.load(ROOT / "config.example.json")
     assert cfg.candidate_id == "123456789"
     assert cfg.birth_date == "12.09.1985"
+    assert cfg.notify_after is None
     assert cfg.notify_before is None
     assert cfg.locations == ["Albisguetli"]
     assert cfg.smtp.host == "smtp.example.ch"
@@ -59,6 +60,19 @@ def test_notify_before_parsed():
     assert Config.from_dict(raw).notify_before == date(2026, 12, 31)
 
 
+def test_notify_after_parsed():
+    raw = good()
+    raw["filter"]["notify_after"] = "01.11.2026"
+    assert Config.from_dict(raw).notify_after == date(2026, 11, 1)
+
+
+def test_notify_after_must_be_dd_mm_yyyy():
+    raw = good()
+    raw["filter"]["notify_after"] = "2026-11-01"
+    with pytest.raises(ConfigError, match="notify_after"):
+        Config.from_dict(raw)
+
+
 def test_missing_smtp_section():
     raw = good()
     del raw["smtp"]
@@ -75,6 +89,7 @@ def test_defaults_when_optional_fields_absent():
     assert cfg.poll_interval_minutes == 60
     assert cfg.max_weeks == 12
     assert cfg.locations == []
+    assert cfg.notify_after is None
     assert cfg.notify_before is None
 
 

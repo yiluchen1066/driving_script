@@ -43,13 +43,14 @@ values into `config.example.json`, which is committed.
 | `credentials.candidate_id` | the number you type into the portal login, digits only |
 | `credentials.birth_date` | `dd.mm.yyyy` |
 | `filter.locations` | exam locations to watch, e.g. `["Albisguetli"]`; spelling with or without umlaut both work; `[]` = all locations |
+| `filter.notify_after` | only alert for slots on or after this date, `dd.mm.yyyy`; `""` = no limit |
 | `filter.notify_before` | only alert for slots on or before this date, `dd.mm.yyyy`; `""` = no limit |
 | `smtp.host` / `smtp.port` / `smtp.starttls` | for Gmail: `smtp.gmail.com`, `587`, `true` |
 | `smtp.user` / `smtp.from` | the Gmail address that sends |
 | `smtp.password` | a Gmail App Password (see below), not your normal password |
 | `smtp.to` | where the alerts go; can be any address |
 | `poll_interval_minutes` | how often to check, default `60` |
-| `max_weeks` | how far ahead to look when `notify_before` is empty, default `12` |
+| `max_weeks` | maximum search horizon in weeks from today or `notify_after`, default `12` |
 
 Gmail App Password: open https://myaccount.google.com/security and turn on
 2-Step Verification, then open https://myaccount.google.com/apppasswords,
