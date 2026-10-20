@@ -479,10 +479,13 @@ class Portal:
             base = max(week_start, base) + timedelta(days=7)
             if not has_next:
                 break
-            if until is not None and base > until:
+            # The portal serves whole Monday-to-Sunday weeks, so keep going as long
+            # as the week of the next request starts on or before the limits.
+            next_monday = base - timedelta(days=base.weekday())
+            if until is not None and next_monday > until:
                 break
             max_date = raw.get("maxDate")
-            if max_date is not None and base > parse_portal_date(max_date):
+            if max_date is not None and next_monday > parse_portal_date(max_date):
                 break
         return out
 

@@ -191,3 +191,18 @@ def test_free_slots_dedupes_a_week_served_twice():
     p.logged_in = True
     slots = p.free_slots(CAT, LOC, start=date(2026, 10, 19), until=None, max_weeks=2)
     assert len(slots) == 1
+
+
+def test_free_slots_fetches_the_week_containing_the_cutoff_when_start_is_midweek():
+    # Window Fri 25.12 .. Tue 29.12: the first request (base Fri 25.12) serves the
+    # week of 21.12; the next base is Fri 01.01, but its week starts Mon 28.12,
+    # which is still inside the window, so it must be fetched.
+    sess = FakeSession({WEEK: [
+        served_week([], week_day=date(2026, 12, 25)),
+        served_week([date(2026, 12, 28)], week_day=date(2027, 1, 1)),
+    ]})
+    p = Portal("1", "01.01.1990", session=sess)
+    p.logged_in = True
+    slots = p.free_slots(CAT, LOC, start=date(2026, 12, 25), until=date(2026, 12, 29), max_weeks=12)
+    assert [s.date for s in slots] == [date(2026, 12, 28)]
+    assert len(sess.calls) == 2
