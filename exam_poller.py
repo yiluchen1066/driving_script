@@ -19,7 +19,7 @@ import smtplib
 import sys
 import time as _time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -61,6 +61,7 @@ class Config:
     smtp: SmtpConfig
     poll_interval_minutes: int = 60
     max_weeks: int = 12
+    auto_book: bool = False
     notify_after: date | None = None
 
     @classmethod
@@ -117,6 +118,9 @@ class Config:
         max_weeks = _int(raw.get("max_weeks", 12), "max_weeks")
         if max_weeks < 1:
             raise ConfigError("max_weeks must be at least 1")
+        auto_book = raw.get("auto_book", False)
+        if not isinstance(auto_book, bool):
+            raise ConfigError("auto_book must be true or false")
 
         return cls(
             candidate_id=candidate_id,
@@ -126,6 +130,7 @@ class Config:
             smtp=smtp,
             poll_interval_minutes=interval,
             max_weeks=max_weeks,
+            auto_book=auto_book,
             notify_after=notify_after,
         )
 
@@ -175,6 +180,9 @@ class Slot:
     date: date
     time: str
     location: str
+    # Portal objects needed to book this slot (category, location, raw entry).
+    # Excluded from equality, ordering and hashing.
+    booking: dict | None = field(default=None, compare=False, repr=False)
 
     @property
     def key(self) -> str:
@@ -211,25 +219,50 @@ class State:
     def __init__(self, path: Path | str):
         self.path = Path(path)
 
-    def load(self) -> set[str]:
+    def _read(self) -> dict:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return set()
+            return {}
         except (ValueError, OSError) as exc:  # bad JSON, truncated UTF-8, unreadable path
             log.warning("state file %s is unreadable (%s), starting fresh", self.path, exc)
-            return set()
-        if not isinstance(data, dict) or not isinstance(data.get("notified"), list):
+            return {}
+        if not isinstance(data, dict):
             log.warning("state file %s has unexpected shape, starting fresh", self.path)
+            return {}
+        return data
+
+    def _write(self, data: dict) -> None:
+        self.path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def load(self) -> set[str]:
+        notified = self._read().get("notified")
+        if not isinstance(notified, list):
             return set()
-        return {str(k) for k in data["notified"]}
+        return {str(k) for k in notified}
 
     def save(self, slots: Iterable[Slot]) -> None:
-        payload = {
-            "notified": sorted(s.key for s in slots),
-            "updated": datetime.now().isoformat(timespec="seconds"),
+        data = self._read()
+        data["notified"] = sorted(s.key for s in slots)
+        data["updated"] = datetime.now().isoformat(timespec="seconds")
+        self._write(data)
+
+    def booked(self) -> dict | None:
+        """The booking this poller made, if any. Once set, auto_book never books again."""
+        booked = self._read().get("booked")
+        return booked if isinstance(booked, dict) else None
+
+    def record_booking(self, slot: Slot, response: dict) -> None:
+        data = self._read()
+        portal = response.get("nouveauRendezVous") if isinstance(response, dict) else None
+        data["booked"] = {
+            "location": slot.location,
+            "date": slot.date.isoformat(),
+            "time": slot.time,
+            "booked_at": datetime.now().isoformat(timespec="seconds"),
+            "portal": {k: v for k, v in (portal or {}).items() if isinstance(v, (str, int, float, bool)) or v is None},
         }
-        self.path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._write(data)
 
     def new_slots(self, slots: list[Slot]) -> list[Slot]:
         seen = self.load()
@@ -434,7 +467,7 @@ class Portal:
         base = start
         for _ in range(max_weeks):
             raw = self.free_week(cat, loc.get("idLieuExamen"), base)
-            slots, has_next = parse_week(raw, name)
+            slots, has_next = parse_week(raw, name, cat, loc)
             for slot in slots:
                 if slot.key not in seen:
                     seen.add(slot.key)
@@ -452,6 +485,48 @@ class Portal:
             if max_date is not None and base > parse_portal_date(max_date):
                 break
         return out
+
+    # -- booking -------------------------------------------------------------
+
+    def choose_slot(self, cat: dict, loc: dict, entry: dict) -> dict:
+        """Non-committing pre-check the UI runs when a slot is clicked. Returns
+        the portal's notice (amount, message, days allowed for moving)."""
+        same_place = cat.get("idLieuExamen") == loc.get("idLieuExamen")
+        body = {
+            "idrendezvous": cat.get("rendezVous"),
+            "typeCategorieLieu": {
+                "idLieuExamen": loc.get("idLieuExamen"),
+                "dateBase": browser_json_date(entry.get("jour")),
+                "idCategorie": cat.get("categorie"),
+                "idGenreExamen": cat.get("idGenreExamen") if same_place else None,
+                "idTypeExamen": cat.get("idTypeExamen"),
+            },
+        }
+        data = self.post("/rendez-vous/choixRdv", body)
+        return data if isinstance(data, dict) else {}
+
+    def book_slot(self, cat: dict, loc: dict, entry: dict) -> dict:
+        """Commit a NEW booking (the UI's Validate button). Raises PortalError
+        unless the portal answers with a nouveauRendezVous object."""
+        slot = dict(entry)
+        slot["jour"] = browser_json_date(entry.get("jour"))
+        body = {
+            "rendezVous": cat.get("rendezVous"),
+            "slot": slot,
+            "typeCategorieLieu": {
+                "idLieuExamen": loc.get("idLieuExamen"),
+                "idCategorie": cat.get("categorie"),
+                "idGenreExamen": cat.get("idGenreExamen"),
+                "idTypeExamen": cat.get("idTypeExamen"),
+            },
+            "action": "confirm",
+        }
+        data = self.post("/rendez-vous/priseRdv", body)
+        if not isinstance(data, dict) or not data.get("nouveauRendezVous"):
+            code = data.get("retCode") if isinstance(data, dict) else None
+            msg = data.get("retMessage") if isinstance(data, dict) else repr(data)[:200]
+            raise PortalError(f"booking not confirmed by the portal (retCode={code}, message={msg})")
+        return data
 
     # -- discovery -----------------------------------------------------------
 
@@ -509,7 +584,8 @@ def location_name(loc: dict) -> str:
     return f"lieu {loc.get('idLieuExamen')}"
 
 
-def parse_week(raw: dict, location: str) -> tuple[list[Slot], bool]:
+def parse_week(raw: dict, location: str, cat: dict | None = None,
+               loc: dict | None = None) -> tuple[list[Slot], bool]:
     code = raw.get("retCode")
     if code is not None and str(code) != "0000":
         raise PortalError(f"portal returned retCode {code}: {raw.get('retMessage')}")
@@ -518,8 +594,82 @@ def parse_week(raw: dict, location: str) -> tuple[list[Slot], bool]:
         day = parse_portal_date(entry["jour"])
         hour = int(entry.get("heure") or 0)
         minute = int(entry.get("minute") or 0)
-        slots.append(Slot(date=day, time=f"{hour:02d}:{minute:02d}", location=location))
+        booking = {"cat": cat, "loc": loc, "entry": entry} if cat is not None and loc is not None else None
+        slots.append(Slot(date=day, time=f"{hour:02d}:{minute:02d}", location=location, booking=booking))
     return slots, bool(raw.get("nextWeek"))
+
+
+def browser_json_date(value: Any) -> Any:
+    """Re-encode a portal date the way the browser sends it back: ISO UTC with Z."""
+    if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit()):
+        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return value
+
+
+BOOK_MIN_DAYS_AHEAD = 10   # hard rule: never book a slot within 10 days of today
+BOOK_COUNTDOWN_SECONDS = 10
+
+
+class StopPolling(Exception):
+    """Raised after a successful booking: there is nothing left to watch."""
+
+
+def format_booked_email(slot: Slot, response: dict) -> tuple[str, str]:
+    when = f"{slot.date.strftime('%a %d.%m.%Y')}  {slot.time}  {slot.location}"
+    portal = response.get("nouveauRendezVous") or {}
+    ref = portal.get("rendezVous") or portal.get("id") or ""
+    subject = f"BOOKED: exam {slot.date.strftime(DATE_FMT)} {slot.time} {slot.location}"
+    body = (
+        "The poller booked this exam slot for you:\n\n"
+        f"  {when}\n\n"
+        + (f"Portal appointment reference: {ref}\n\n" if ref else "")
+        + "Log in to the portal, check the appointment and print the convocation yourself; "
+        "the portal requires that within a few days:\n"
+        f"{BOOKING_URL}\n\n"
+        "The poller has stopped. It will not book again while state.json records this booking.\n"
+    )
+    return subject, body
+
+
+def attempt_booking(cfg: Config, portal: Portal, state: State, notifier: Notifier,
+                    alerts: Alerts, matches: list[Slot]) -> None:
+    """Book the earliest matching slot that is more than BOOK_MIN_DAYS_AHEAD days away."""
+    if state.booked() is not None:
+        log.info("auto_book is on but a booking is already recorded in %s; not booking again", state.path)
+        return
+    today = datetime.now(ZURICH).date()
+    eligible = [s for s in matches if s.booking and (s.date - today).days > BOOK_MIN_DAYS_AHEAD]
+    too_close = len(matches) - len(eligible)
+    if too_close:
+        log.info("%d matching slot(s) not bookable: within %d days of today", too_close, BOOK_MIN_DAYS_AHEAD)
+    if not eligible:
+        return
+    target = eligible[0]
+    label = f"{target.date.strftime('%a %d.%m.%Y')} {target.time} {target.location}"
+    if notifier.dry_run:
+        print(f"--- DRY RUN booking ---\nWould book: {label}", flush=True)
+        log.info("dry run: would book %s", label)
+        return
+    log.warning("BOOKING %s in %d seconds (Ctrl-C to abort)", label, BOOK_COUNTDOWN_SECONDS)
+    _time.sleep(BOOK_COUNTDOWN_SECONDS)
+    b = target.booking
+    try:
+        notice = portal.choose_slot(b["cat"], b["loc"], b["entry"])
+        log.info("portal pre-check: amount=%s message=%s", notice.get("montant"), notice.get("message"))
+        result = portal.book_slot(b["cat"], b["loc"], b["entry"])
+    except PortalError as exc:
+        alerts.raise_("booking", f"Booking {label} failed: {exc}. "
+                                 "The poller keeps running and will try again next cycle if a slot is free.")
+        return
+    state.record_booking(target, result)
+    alerts.clear("booking")
+    log.warning("BOOKED %s", label)
+    subject, body = format_booked_email(target, result)
+    try:
+        notifier.send(subject, body)
+    except (smtplib.SMTPException, OSError) as exc:
+        log.error("booked %s but the confirmation email failed: %s", label, exc)
+    raise StopPolling(f"booked {label}")
 
 
 def run_cycle(cfg: Config, portal: Portal, flt: SlotFilter, state: State,
@@ -576,6 +726,8 @@ def run_cycle(cfg: Config, portal: Portal, flt: SlotFilter, state: State,
     if new:
         notifier.send_slots(new)
     state.save(matches)
+    if cfg.auto_book and matches:
+        attempt_booking(cfg, portal, state, notifier, alerts, matches)
     return len(new)
 
 
@@ -659,6 +811,9 @@ def main(argv: list[str] | None = None) -> int:
             failures = 0
             alerts.clear("errors")
             log.info("cycle done, %d new slot(s)", new)
+        except StopPolling as exc:
+            log.info("stopping: %s", exc)
+            return 0
         except LoginRejected as exc:
             failures += 1  # back off so bad credentials are not retried at full rate
             log.warning("login rejected (%d in a row): %s", failures, exc)

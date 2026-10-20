@@ -51,6 +51,7 @@ values into `config.example.json`, which is committed.
 | `smtp.to` | where the alerts go; can be any address |
 | `poll_interval_minutes` | how often to check, default `60` |
 | `max_weeks` | maximum search horizon in weeks from today or `notify_after`, default `12` |
+| `auto_book` | `true` books the earliest matching slot automatically, see below; default `false` |
 
 Gmail App Password: open https://myaccount.google.com/security and turn on
 2-Step Verification, then open https://myaccount.google.com/apppasswords,
@@ -136,6 +137,30 @@ Is it running? Look for a fresh `next poll in ... min` line at the end of
   off up to six hours between attempts while a problem persists.
 
 Booking itself is not automated: open the portal link in the email and book.
+
+## Automatic booking
+
+Off by default. With `"auto_book": true` in `config.json` the poller books the
+earliest slot that matches your filter, in the same cycle it finds it, with no
+further confirmation. Read this before switching it on:
+
+- **Hard rule:** a slot within 10 days of today is never booked. Such slots are
+  still emailed, just not booked.
+- The booking is real and immediate. The log shows `BOOKING <slot> in 10
+  seconds` first; stop the poller in that window to abort.
+- On success you get an email with subject `BOOKED: ...`, the booking is
+  written to `state.json`, and the poller stops. It will not book a second time
+  while that record exists, even if restarted with the flag still on.
+- On failure you get one email with the portal's message and the poller keeps
+  polling.
+- `--dry-run` never books; it prints `Would book: ...` instead.
+- After booking, log in to the portal yourself to check the appointment and
+  print the convocation, which the portal requires within a few days.
+- Cancelling or moving a booked appointment is not automated; do that in the
+  portal.
+
+The flag is read every cycle, so it can be switched on or off while the poller
+runs.
 
 ## Other flags
 

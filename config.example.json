@@ -11,5 +11,6 @@
     "starttls": true
   },
   "poll_interval_minutes": 60,
-  "max_weeks": 12
+  "max_weeks": 12,
+  "auto_book": false
 }
