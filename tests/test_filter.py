@@ -80,3 +80,26 @@ def test_key_is_stable_and_unique_per_slot():
     b = slot(date(2026, 11, 20), "08:30")
     assert a.key == "Zürich-Albisgüetli|2026-11-20|08:00"
     assert a.key != b.key
+
+
+def test_dates_filter_matches_only_listed_days_and_time_ranges():
+    from exam_poller import DateWindow
+    f = SlotFilter(None, [], dates=[
+        DateWindow(date(2026, 11, 20), None, "15:00"),
+        DateWindow(date(2026, 11, 27), "13:00", "18:00"),
+        DateWindow(date(2026, 12, 4)),
+    ])
+    assert f.slot_matches(slot(date(2026, 11, 20), "15:00"))      # inclusive end
+    assert not f.slot_matches(slot(date(2026, 11, 20), "15:30"))
+    assert f.slot_matches(slot(date(2026, 11, 27), "13:00"))      # inclusive start
+    assert not f.slot_matches(slot(date(2026, 11, 27), "12:30"))
+    assert f.slot_matches(slot(date(2026, 12, 4), "07:00"))       # whole day
+    assert not f.slot_matches(slot(date(2026, 12, 5), "10:00"))   # unlisted day
+
+
+def test_dates_filter_narrows_search_bounds():
+    from exam_poller import DateWindow
+    f = SlotFilter(date(2026, 12, 31), [], notify_after=None,
+                   dates=[DateWindow(date(2026, 12, 4)), DateWindow(date(2026, 11, 20))])
+    assert f.search_bounds(date(2026, 10, 21)) == (date(2026, 11, 20), date(2026, 12, 4))
+    assert SlotFilter(None, []).search_bounds(date(2026, 10, 21)) == (date(2026, 10, 21), None)

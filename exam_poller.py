@@ -52,6 +52,51 @@ class SmtpConfig:
     starttls: bool = True
 
 
+TIME_FMT = "%H:%M"
+
+
+def _check_time(text: str, name: str) -> str:
+    try:
+        return datetime.strptime(text, TIME_FMT).strftime(TIME_FMT)
+    except ValueError:
+        raise ConfigError(f"{name} must be HH:MM, got {text!r}") from None
+
+
+@dataclass
+class DateWindow:
+    """One entry of filter.dates: a day, optionally limited to a time range (inclusive)."""
+    day: date
+    start: str | None = None   # "HH:MM"
+    end: str | None = None     # "HH:MM"
+
+    @classmethod
+    def from_dict(cls, raw: dict, name: str) -> "DateWindow":
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{name} must be an object like {{\"date\": \"dd.mm.yyyy\", \"from\": \"HH:MM\", \"to\": \"HH:MM\"}}")
+        day_text = str(raw.get("date") or "").strip()
+        if not day_text:
+            raise ConfigError(f"{name}.date is required")
+        _check_date(day_text, f"{name}.date")
+        start = str(raw.get("from") or "").strip() or None
+        end = str(raw.get("to") or "").strip() or None
+        if start:
+            start = _check_time(start, f"{name}.from")
+        if end:
+            end = _check_time(end, f"{name}.to")
+        if start and end and start > end:
+            raise ConfigError(f"{name}: 'from' {start} is after 'to' {end}")
+        return cls(day=parse_date(day_text), start=start, end=end)
+
+    def contains(self, day: date, time_text: str) -> bool:
+        if day != self.day:
+            return False
+        if self.start is not None and time_text < self.start:
+            return False
+        if self.end is not None and time_text > self.end:
+            return False
+        return True
+
+
 @dataclass
 class Config:
     candidate_id: str
@@ -63,6 +108,7 @@ class Config:
     max_weeks: int = 12
     auto_book: bool = False
     notify_after: date | None = None
+    dates: list[DateWindow] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path | str) -> "Config":
@@ -100,6 +146,10 @@ class Config:
         locations = filt.get("locations") or []
         if not isinstance(locations, list) or not all(isinstance(x, str) for x in locations):
             raise ConfigError("filter.locations must be a list of strings")
+        dates_raw = filt.get("dates") or []
+        if not isinstance(dates_raw, list):
+            raise ConfigError("filter.dates must be a list")
+        dates = [DateWindow.from_dict(d, f"filter.dates[{i}]") for i, d in enumerate(dates_raw)]
 
         smtp_raw = _section(raw, "smtp")
         smtp = SmtpConfig(
@@ -132,6 +182,7 @@ class Config:
             max_weeks=max_weeks,
             auto_book=auto_book,
             notify_after=notify_after,
+            dates=dates,
         )
 
 
@@ -191,9 +242,10 @@ class Slot:
 
 class SlotFilter:
     def __init__(self, notify_before: date | None, locations: list[str],
-                 notify_after: date | None = None):
+                 notify_after: date | None = None, dates: Iterable[DateWindow] = ()):
         self.notify_before = notify_before
         self.notify_after = notify_after
+        self.dates = list(dates)
         self.locations = [normalise(name) for name in locations if name.strip()]
 
     def location_matches(self, name: str) -> bool:
@@ -207,7 +259,21 @@ class SlotFilter:
             return False
         if self.notify_before is not None and slot.date > self.notify_before:
             return False
+        if self.dates and not any(w.contains(slot.date, slot.time) for w in self.dates):
+            return False
         return self.location_matches(slot.location)
+
+    def search_bounds(self, today: date) -> tuple[date, date | None]:
+        """First day to request and last day worth requesting, from all date limits."""
+        start = today
+        if self.notify_after is not None:
+            start = max(start, self.notify_after)
+        until = self.notify_before
+        if self.dates:
+            start = max(start, min(w.day for w in self.dates))
+            last = max(w.day for w in self.dates)
+            until = last if until is None else min(until, last)
+        return start, until
 
     def apply(self, slots: Iterable[Slot]) -> list[Slot]:
         return sorted(s for s in slots if self.slot_matches(s))
@@ -699,7 +765,11 @@ def run_cycle(cfg: Config, portal: Portal, flt: SlotFilter, state: State,
     alerts.clear("login")
 
     today = datetime.now(ZURICH).date()
-    start = max(today, flt.notify_after) if flt.notify_after is not None else today
+    start, until = flt.search_bounds(today)
+    if until is not None and until < start:
+        log.info("no dates left to search: window ends %s, search would start %s", until, start)
+        state.save([])
+        return 0
     found: list[Slot] = []
     seen_names: list[str] = []
     matched_locations = 0
@@ -712,7 +782,7 @@ def run_cycle(cfg: Config, portal: Portal, flt: SlotFilter, state: State,
                 log.debug("skipping location %s", name)
                 continue
             matched_locations += 1
-            slots = portal.free_slots(cat, loc, start=start, until=flt.notify_before,
+            slots = portal.free_slots(cat, loc, start=start, until=until,
                                       max_weeks=cfg.max_weeks)
             log.info("%s: %d free slot(s) found", name, len(slots))
             found.extend(slots)
@@ -801,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
 
     notifier = Notifier(cfg.smtp, dry_run=args.dry_run)
     alerts = Alerts(notifier)
-    flt = SlotFilter(cfg.notify_before, cfg.locations, cfg.notify_after)
+    flt = SlotFilter(cfg.notify_before, cfg.locations, cfg.notify_after, cfg.dates)
     state = State(args.state)
     base_delay = cfg.poll_interval_minutes * 60
     failures = 0
@@ -857,7 +927,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg = fresh
             portal.candidate_id, portal.birth_date = cfg.candidate_id, cfg.birth_date
             portal.logged_in = False
-            flt = SlotFilter(cfg.notify_before, cfg.locations, cfg.notify_after)
+            flt = SlotFilter(cfg.notify_before, cfg.locations, cfg.notify_after, cfg.dates)
             notifier.smtp = cfg.smtp
             base_delay = cfg.poll_interval_minutes * 60
 

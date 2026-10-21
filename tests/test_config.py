@@ -98,3 +98,17 @@ def test_interval_must_be_positive():
     raw["poll_interval_minutes"] = 0
     with pytest.raises(ConfigError, match="poll_interval_minutes"):
         Config.from_dict(raw)
+
+
+def test_dates_entries_are_parsed_and_validated():
+    raw = good()
+    raw["filter"]["dates"] = [{"date": "20.11.2026", "to": "15:00"}, {"date": "04.12.2026"}]
+    cfg = Config.from_dict(raw)
+    assert [(d.day, d.start, d.end) for d in cfg.dates] == [
+        (date(2026, 11, 20), None, "15:00"), (date(2026, 12, 4), None, None)]
+    raw["filter"]["dates"] = [{"date": "20.11.2026", "from": "16:00", "to": "15:00"}]
+    with pytest.raises(ConfigError, match="after"):
+        Config.from_dict(raw)
+    raw["filter"]["dates"] = [{"date": "2026-11-20"}]
+    with pytest.raises(ConfigError, match="dd.mm.yyyy"):
+        Config.from_dict(raw)

@@ -45,6 +45,7 @@ values into `config.example.json`, which is committed.
 | `filter.locations` | exam locations to watch, e.g. `["Albisguetli"]`; spelling with or without umlaut both work; `[]` = all locations |
 | `filter.notify_after` | only alert for slots on or after this date, `dd.mm.yyyy`; `""` = no limit |
 | `filter.notify_before` | only alert for slots on or before this date, `dd.mm.yyyy`; `""` = no limit |
+| `filter.dates` | optional list of specific days, each `{"date": "dd.mm.yyyy", "from": "HH:MM", "to": "HH:MM"}`; `from`/`to` are optional and inclusive, omit both for the whole day; when the list is non-empty only slots on these days and times are reported or booked; see example below |
 | `smtp.host` / `smtp.port` / `smtp.starttls` | for Gmail: `smtp.gmail.com`, `587`, `true` |
 | `smtp.user` / `smtp.from` | the Gmail address that sends |
 | `smtp.password` | a Gmail App Password (see below), not your normal password |
@@ -60,6 +61,25 @@ create one named for example "exam poller", and paste the 16-letter code into
 
 The config is re-read before every poll, so you can edit it while the
 poller runs. No restart needed.
+
+Example of specific days and time ranges, combined with the location filter:
+
+```json
+"filter": {
+  "locations": ["Albisguetli"],
+  "notify_after": "",
+  "notify_before": "",
+  "dates": [
+    {"date": "20.11.2026", "to": "15:00"},
+    {"date": "27.11.2026", "from": "13:00", "to": "18:00"},
+    {"date": "04.12.2026"},
+    {"date": "11.12.2026", "to": "12:00"}
+  ]
+}
+```
+
+With `dates` set the search only covers the span between the first and last
+listed day, so fewer requests are made per poll.
 
 ## 3. Test the email
 
