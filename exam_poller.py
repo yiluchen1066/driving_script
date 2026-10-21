@@ -555,6 +555,27 @@ class Portal:
                 break
         return out
 
+    def existing_appointments(self) -> int | None:
+        """How many appointments the portal already holds for this candidate."""
+        try:
+            data = self.get("/rendez-vous/listeRdvPrive")
+        except PortalError:
+            return None
+        lst = data.get("listeRdvPrive") if isinstance(data, dict) else None
+        return len(lst) if isinstance(lst, list) else None
+
+    def nothing_offered_reason(self) -> str:
+        n = self.existing_appointments()
+        text = "The portal offers no exam category or location for your record, so there is nothing to search. "
+        if n:
+            text += (f"It shows {n} existing appointment(s). While an appointment exists the portal does not offer "
+                     "a new booking; cancel it in the portal if you want the poller to search and book again.")
+        elif n == 0:
+            text += "It shows no existing appointment either; check your record in the portal."
+        else:
+            text += "Check your record in the portal."
+        return text
+
     # -- booking -------------------------------------------------------------
 
     def choose_slot(self, cat: dict, loc: dict, entry: dict) -> dict:
@@ -787,9 +808,15 @@ def run_cycle(cfg: Config, portal: Portal, flt: SlotFilter, state: State,
             log.info("%s: %d free slot(s) found", name, len(slots))
             found.extend(slots)
 
+    if not seen_names:
+        alerts.clear("filter")
+        alerts.raise_("nothing-offered", portal.nothing_offered_reason())
+        state.save([])
+        return 0
+    alerts.clear("nothing-offered")
     if flt.locations and matched_locations == 0:
         alerts.raise_("filter", f"No exam location matched filter.locations={cfg.locations}. "
-                                f"The portal lists: {', '.join(seen_names) or 'nothing'}. "
+                                f"The portal lists: {', '.join(seen_names)}. "
                                 "Fix the filter in the config.")
     else:
         alerts.clear("filter")
